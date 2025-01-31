@@ -44,8 +44,37 @@ from cryodrgn.models import HetOnlyVAE, unparallelize
 from cryodrgn.pose import PoseTracker
 import cryodrgn.config
 
+#Add transforms and random to enable random applications of transformations for loss comparisons
+from torchvision import transforms
+from torchvision import datasets
+import random
+
 logger = logging.getLogger(__name__)
 
+
+#New function to randomly flip the image
+def augment_image(y, rot, D):
+    # Random flip (horizontal or vertical)
+    if random.random() > 0.5:
+        y = torch.flip(y, dims=[-1])  # Flip vertically
+    if random.random() < 0.5:
+        y = torch.flip(y, dims=[-2])  # Flip horizontally
+
+    # Random rotation (90, 180, or 270 degrees)
+    angle = random.choice([90, 180, 270])
+    y = torch.rot90(y, k=angle // 90, dims=(-2, -1))
+
+    # For the rotation, we also need to apply the corresponding rotation matrix to `rot`
+    rot_matrix = torch.eye(D).to(y.device)
+    if angle == 90:
+        rot_matrix = torch.tensor([[0, -1], [1, 0]], device=y.device)  # 90-degree rotation matrix
+    elif angle == 180:
+        rot_matrix = torch.tensor([[-1, 0], [0, -1]], device=y.device)  # 180-degree rotation matrix
+    elif angle == 270:
+        rot_matrix = torch.tensor([[0, 1], [-1, 0]], device=y.device)  # 270-degree rotation matrix
+
+    rot = rot @ rot_matrix  # Update rotation matrix
+    return y, rot
 
 def add_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
@@ -385,10 +414,52 @@ def train_batch(
     else:
         amp_mode = contextlib.nullcontext()
 
+def train_batch(
+    model: nn.Module,
+    lattice: Lattice,
+    y,
+    ntilts: Optional[int],
+    rot,
+    trans,
+    optim,
+    beta,
+    beta_control=None,
+    ctf_params=None,
+    yr=None,
+    use_amp: bool = False,
+    scaler=None,
+    dose_filters=None,
+):
+    optim.zero_grad()
+    model.train()
+
+    if trans is not None:
+        y = preprocess_input(y, lattice, trans)
+
+    # Cast operations to mixed precision if using torch.cuda.amp.GradScaler()
+    if scaler is not None:
+        try:
+            amp_mode = torch.amp.autocast("cuda")
+        except AttributeError:
+            amp_mode = torch.cuda.amp.autocast_mode.autocast()
+    else:
+        amp_mode = contextlib.nullcontext()
+
     with amp_mode:
+        # Augment original image
+        y_aug, rot_aug = augment_image(y.clone(), rot.clone(), lattice.D)
+
+        # Process original and augmented images
         z_mu, z_logvar, z, y_recon, mask = run_batch(
             model, lattice, y, rot, ntilts, ctf_params, yr
         )
+        z_mu_aug, z_logvar_aug, z_aug, y_recon_aug, mask_aug = run_batch(
+            model, lattice, y_aug, rot_aug, ntilts, ctf_params, yr
+        )
+
+        # Compute loss with squared difference in latent space
+        latent_loss = torch.mean((z - z_aug) ** 2)
+
         loss, gen_loss, kld = loss_function(
             z_mu,
             z_logvar,
@@ -400,6 +471,25 @@ def train_batch(
             beta_control,
             dose_filters,
         )
+
+        # Add latent loss to the final loss
+        loss += latent_loss * 0.05  # Weight for latent loss, adjust as needed
+
+    if use_amp:
+        if scaler is not None:  # torch mixed precision
+            scaler.scale(loss).backward()
+            scaler.step(optim)
+            scaler.update()
+        else:  # apex.amp mixed precision
+            with amp.scale_loss(loss, optim) as scaled_loss:
+                scaled_loss.backward()
+            optim.step()
+    else:
+        loss.backward()
+        optim.step()
+
+    return loss.item(), gen_loss.item(), kld.item()
+
 
     if use_amp:
         if scaler is not None:  # torch mixed precision
