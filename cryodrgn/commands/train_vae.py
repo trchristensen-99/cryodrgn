@@ -66,15 +66,29 @@ def augment_image(y, rot, D):
     y = torch.rot90(y, k=angle // 90, dims=(-2, -1))
 
     # For the rotation, we also need to apply the corresponding rotation matrix to `rot`
-    rot_matrix = torch.eye(D).to(y.device)
-    if angle == 90:
-        rot_matrix = torch.tensor([[0, -1], [1, 0]], device=y.device)  # 90-degree rotation matrix
-    elif angle == 180:
-        rot_matrix = torch.tensor([[-1, 0], [0, -1]], device=y.device)  # 180-degree rotation matrix
-    elif angle == 270:
-        rot_matrix = torch.tensor([[0, 1], [-1, 0]], device=y.device)  # 270-degree rotation matrix
+    if D == 3:  # Assuming D is 3 for 3D space
+        rot_matrix = torch.eye(3).to(y.device)  # Start with the identity matrix (3x3)
+        if angle == 90:
+            rot_matrix = torch.tensor([[0, -1, 0], [1, 0, 0], [0, 0, 1]], device=y.device)  # 90-degree rotation around Z
+        elif angle == 180:
+            rot_matrix = torch.tensor([[-1, 0, 0], [0, -1, 0], [0, 0, 1]], device=y.device)  # 180-degree rotation around Z
+        elif angle == 270:
+            rot_matrix = torch.tensor([[0, 1, 0], [-1, 0, 0], [0, 0, 1]], device=y.device)  # 270-degree rotation around Z
 
-    rot = rot @ rot_matrix  # Update rotation matrix
+        # Update rotation matrix (ensure dimensional consistency)
+        rot = torch.matmul(rot, rot_matrix)  # Matrix multiplication (rot is 3D)
+    else:
+        # Handle 2D case (same logic as before)
+        rot_matrix = torch.eye(2).to(y.device)
+        if angle == 90:
+            rot_matrix = torch.tensor([[0, -1], [1, 0]], device=y.device)  # 90-degree rotation matrix
+        elif angle == 180:
+            rot_matrix = torch.tensor([[-1, 0], [0, -1]], device=y.device)  # 180-degree rotation matrix
+        elif angle == 270:
+            rot_matrix = torch.tensor([[0, 1], [-1, 0]], device=y.device)  # 270-degree rotation matrix
+
+        rot = torch.matmul(rot, rot_matrix)  # Update rotation matrix
+
     return y, rot
 
 def add_args(parser: argparse.ArgumentParser) -> None:
