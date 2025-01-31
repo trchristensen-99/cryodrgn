@@ -45,6 +45,7 @@ from cryodrgn.pose import PoseTracker
 import cryodrgn.config
 
 #Add transforms and random to enable random applications of transformations for loss comparisons
+import torchvision
 from torchvision import transforms
 from torchvision import datasets
 import random
