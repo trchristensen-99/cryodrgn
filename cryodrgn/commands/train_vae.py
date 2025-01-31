@@ -58,36 +58,27 @@ def augment_image(y, rot, D):
     # Random flip (horizontal or vertical)
     if random.random() > 0.5:
         y = torch.flip(y, dims=[-1])  # Flip vertically
+        rot = rot @ torch.tensor([[-1, 0, 0], [0, 1, 0], [0, 0, 1]], device=y.device)  # Flip in the X-axis (horizontal flip)
+    
     if random.random() < 0.5:
         y = torch.flip(y, dims=[-2])  # Flip horizontally
+        rot = rot @ torch.tensor([[1, 0, 0], [0, -1, 0], [0, 0, 1]], device=y.device)  # Flip in the Y-axis (vertical flip)
 
     # Random rotation (90, 180, or 270 degrees)
     angle = random.choice([90, 180, 270])
-    y = torch.rot90(y, k=angle // 90, dims=(-2, -1))
 
-    # For the rotation, we also need to apply the corresponding rotation matrix to `rot`
-    if D == 3:  # Assuming D is 3 for 3D space
-        rot_matrix = torch.eye(3).to(y.device)  # Start with the identity matrix (3x3)
-        if angle == 90:
-            rot_matrix = torch.tensor([[0, -1, 0], [1, 0, 0], [0, 0, 1]], device=y.device)  # 90-degree rotation around Z
-        elif angle == 180:
-            rot_matrix = torch.tensor([[-1, 0, 0], [0, -1, 0], [0, 0, 1]], device=y.device)  # 180-degree rotation around Z
-        elif angle == 270:
-            rot_matrix = torch.tensor([[0, 1, 0], [-1, 0, 0], [0, 0, 1]], device=y.device)  # 270-degree rotation around Z
+    if angle == 90:
+        rot_matrix = torch.tensor([[0, -1, 0], [1, 0, 0], [0, 0, 1]], device=y.device)  # 90-degree rotation matrix around Z-axis
+    elif angle == 180:
+        rot_matrix = torch.tensor([[-1, 0, 0], [0, -1, 0], [0, 0, 1]], device=y.device)  # 180-degree rotation matrix around Z-axis
+    elif angle == 270:
+        rot_matrix = torch.tensor([[0, 1, 0], [-1, 0, 0], [0, 0, 1]], device=y.device)  # 270-degree rotation matrix around Z-axis
 
-        # Update rotation matrix (ensure dimensional consistency)
-        rot = torch.matmul(rot, rot_matrix)  # Matrix multiplication (rot is 3D)
-    else:
-        # Handle 2D case (same logic as before)
-        rot_matrix = torch.eye(2).to(y.device)
-        if angle == 90:
-            rot_matrix = torch.tensor([[0, -1], [1, 0]], device=y.device)  # 90-degree rotation matrix
-        elif angle == 180:
-            rot_matrix = torch.tensor([[-1, 0], [0, -1]], device=y.device)  # 180-degree rotation matrix
-        elif angle == 270:
-            rot_matrix = torch.tensor([[0, 1], [-1, 0]], device=y.device)  # 270-degree rotation matrix
+    # Apply rotation to the `rot` matrix
+    rot = rot @ rot_matrix  # Matrix multiplication to update the rotation matrix
 
-        rot = torch.matmul(rot, rot_matrix)  # Update rotation matrix
+    # Apply the same rotation to the image y
+    y = torch.rot90(y, k=angle // 90, dims=(-2, -1))  # Apply the rotation to the image
 
     return y, rot
 
