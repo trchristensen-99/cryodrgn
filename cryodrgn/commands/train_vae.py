@@ -82,6 +82,7 @@ def augment_image(y, rot, D):
 
     return y, rot
 
+
 def add_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "particles",
