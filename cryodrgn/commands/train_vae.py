@@ -44,7 +44,54 @@ from cryodrgn.models import HetOnlyVAE, unparallelize
 from cryodrgn.pose import PoseTracker
 import cryodrgn.config
 
+#Add transforms and random to enable random applications of transformations for loss comparisons
+import torchvision
+from torchvision import transforms
+from torchvision import datasets
+import random
+
 logger = logging.getLogger(__name__)
+
+
+# New function to randomly flip the image
+def augment_image(y, rot, D):
+    # Ensure both `rot` and flip matrices are the same dtype as `rot`
+    ###dtype = rot.dtype
+
+    # Ensure that y and rot are contiguous
+    y = y.contiguous()
+    ###rot = rot.contiguous()
+
+    # Random flip (horizontal or vertical)
+    if random.random() > 0.5:
+        y = torch.flip(y, dims=[-1])  # Flip vertically
+        ###flip_matrix = torch.tensor([[-1, 0, 0], [0, 1, 0], [0, 0, 1]], device=y.device, dtype=dtype)  # Flip in the X-axis (horizontal flip)
+        ###rot = rot @ flip_matrix  # Flip in the X-axis (horizontal flip)
+    
+    if random.random() < 0.5:
+        y = torch.flip(y, dims=[-2])  # Flip horizontally
+        ###flip_matrix = torch.tensor([[1, 0, 0], [0, -1, 0], [0, 0, 1]], device=y.device, dtype=dtype)  # Flip in the Y-axis (vertical flip)
+        ###rot = rot @ flip_matrix  # Flip in the Y-axis (vertical flip)
+
+    # Random rotation (90, 180, or 270 degrees)
+    angle = random.choice([90, 180, 270])
+
+    ###if angle == 90:
+        ###rot_matrix = torch.tensor([[0, -1, 0], [1, 0, 0], [0, 0, 1]], device=y.device, dtype=dtype)  # 90-degree rotation matrix around Z-axis
+    ###elif angle == 180:
+        ###rot_matrix = torch.tensor([[-1, 0, 0], [0, -1, 0], [0, 0, 1]], device=y.device, dtype=dtype)  # 180-degree rotation matrix around Z-axis
+    ###elif angle == 270:
+        ###rot_matrix = torch.tensor([[0, 1, 0], [-1, 0, 0], [0, 0, 1]], device=y.device, dtype=dtype)  # 270-degree rotation matrix around Z-axis
+
+    # Apply rotation to the `rot` matrix
+    ###rot = rot @ rot_matrix  # Matrix multiplication to update the rotation matrix
+
+    # Apply the same rotation to the image y
+    y = torch.rot90(y, k=angle // 90, dims=(-2, -1))  # Apply the rotation to the image
+
+    return y, rot
+
+
 
 
 def add_args(parser: argparse.ArgumentParser) -> None:
@@ -373,6 +420,7 @@ def train_batch(
 ):
     optim.zero_grad()
     model.train()
+
     if trans is not None:
         y = preprocess_input(y, lattice, trans)
 
@@ -386,9 +434,26 @@ def train_batch(
         amp_mode = contextlib.nullcontext()
 
     with amp_mode:
+        # Augment original image
+        y_aug, rot_aug = augment_image(y.clone(), rot.clone(), lattice.D)
+
+        # Ensure tensors are contiguous
+        y = y.contiguous()
+        rot = rot.contiguous()
+        y_aug = y_aug.contiguous()
+        rot_aug = rot_aug.contiguous()
+
+        # Process original and augmented images
         z_mu, z_logvar, z, y_recon, mask = run_batch(
             model, lattice, y, rot, ntilts, ctf_params, yr
         )
+        z_mu_aug, z_logvar_aug, z_aug, y_recon_aug, mask_aug = run_batch(
+            model, lattice, y_aug, rot_aug, ntilts, ctf_params, yr
+        )
+
+        # Compute loss with squared difference in latent space
+        latent_loss = torch.mean((z - z_aug) ** 2)
+
         loss, gen_loss, kld = loss_function(
             z_mu,
             z_logvar,
@@ -400,6 +465,9 @@ def train_batch(
             beta_control,
             dose_filters,
         )
+
+        # Add latent loss to the final loss
+        loss += latent_loss * 0.05  # Weight for latent loss, adjust as needed
 
     if use_amp:
         if scaler is not None:  # torch mixed precision
@@ -414,7 +482,8 @@ def train_batch(
         loss.backward()
         optim.step()
 
-    return loss.item(), gen_loss.item(), kld.item()
+    return loss.item(), latent_loss.item(), kld.item()
+
 
 
 def preprocess_input(y, lattice, trans):
@@ -425,7 +494,7 @@ def preprocess_input(y, lattice, trans):
     return y
 
 
-def run_batch(model, lattice, y, rot, ntilts: Optional[int], ctf_params=None, yr=None):
+def run_batch(model, lattice, y, rot, ntilts: Optional[int], ctf_params=None, yr=None, decode=False):
     use_ctf = ctf_params is not None
     B = y.size(0)
     D = lattice.D
@@ -446,17 +515,22 @@ def run_batch(model, lattice, y, rot, ntilts: Optional[int], ctf_params=None, yr
     _model = unparallelize(model)
     assert isinstance(_model, HetOnlyVAE)
     z_mu, z_logvar = _model.encode(*input_)
-    z = _model.reparameterize(z_mu, z_logvar)
-    if ntilts is not None:
-        z = torch.repeat_interleave(z, ntilts, dim=0)
 
-    # decode
-    mask = lattice.get_circular_mask(D // 2)  # restrict to circular mask
-    y_recon = model(lattice.coords[mask] / lattice.extent / 2 @ rot, z).view(B, -1)
-    if c is not None:
-        y_recon *= c.view(B, -1)[:, mask]
+    # Always return z_mu and z_logvar
+    result = (z_mu, z_logvar)
+    
+    # If decode is True, then proceed with decoding and return additional variables
+    if decode:
+        z = _model.reparameterize(z_mu, z_logvar)
+        if ntilts is not None:
+            z = torch.repeat_interleave(z, ntilts, dim=0)
+        mask = lattice.get_circular_mask(D // 2)  # restrict to circular mask
+        y_recon = model(lattice.coords[mask] / lattice.extent / 2 @ rot, z).view(B, -1)
+        if c is not None:
+            y_recon *= c.view(B, -1)[:, mask]
+        result += (z, y_recon, mask)  # Append decoded variables to result tuple
 
-    return z_mu, z_logvar, z, y_recon, mask
+    return result
 
 
 def loss_function(
@@ -464,20 +538,13 @@ def loss_function(
     z_logvar,
     y,
     ntilts: Optional[int],
-    y_recon,
-    mask,
+    y_recon=None,  # Default to None since we no longer need it
+    mask=None,     # Default to None since we no longer need it
     beta: float,
     beta_control=None,
     dose_filters=None,
 ):
-    # reconstruction error
-    B = y.size(0)
-    y = y.view(B, -1)[:, mask]
-    if dose_filters is not None:
-        y_recon = torch.mul(y_recon, dose_filters[:, mask])
-    gen_loss = F.mse_loss(y_recon, y)
-
-    # latent loss
+    # Latent loss (KLD)
     kld = torch.mean(
         -0.5 * torch.sum(1 + z_logvar - z_mu.pow(2) - z_logvar.exp(), dim=1), dim=0
     )
@@ -486,13 +553,14 @@ def loss_function(
         logger.info(z_logvar[0])
         raise RuntimeError("KLD is nan")
 
-    # total loss
+    # reconstruction loss is no longer computed, so we just return the KLD and the loss
     if beta_control is None:
-        loss = gen_loss + beta * kld / mask.sum().float()
+        loss = beta * kld  # Only use KLD (latent loss) in final loss
     else:
-        loss = gen_loss + beta_control * (beta - kld) ** 2 / mask.sum().float()
+        loss = beta_control * (beta - kld) ** 2
 
-    return loss, gen_loss, kld
+    return loss, 0, kld  # Return gen_loss as 0 because we're no longer using y_recon or mask
+
 
 
 def eval_z(
@@ -910,7 +978,7 @@ def main(args: argparse.Namespace) -> None:
     Nparticles = Nimg if args.encode_mode != "tilt" else data.Np
     for epoch in range(start_epoch, num_epochs):
         t2 = dt.now()
-        gen_loss_accum = 0
+        latent_loss_accum = 0
         loss_accum = 0
         kld_accum = 0
         batch_it = 0
@@ -946,7 +1014,7 @@ def main(args: argparse.Namespace) -> None:
                 rot, tran = posetracker.get_pose(ind)
                 ctf_param = ctf_params[ind] if ctf_params is not None else None
 
-            loss, gen_loss, kld = train_batch(
+            loss, latent_loss, kld = train_batch(
                 model,
                 lattice,
                 y,
@@ -966,7 +1034,7 @@ def main(args: argparse.Namespace) -> None:
                 pose_optimizer.step()
 
             # logging
-            gen_loss_accum += gen_loss * B
+            latent_loss_accum += latent_loss * B
             kld_accum += kld * B
             loss_accum += loss * B
 
@@ -978,7 +1046,7 @@ def main(args: argparse.Namespace) -> None:
                         num_epochs,
                         batch_it,
                         Nparticles,
-                        gen_loss,
+                        latent_loss,
                         kld,
                         beta,
                         loss,
@@ -987,7 +1055,7 @@ def main(args: argparse.Namespace) -> None:
         logger.info(
             "# =====> Epoch: {} Average gen loss = {:.6}, KLD = {:.6f}, total loss = {:.6f}; Finished in {}".format(
                 epoch + 1,
-                gen_loss_accum / Nparticles,
+                latent_loss_accum / Nparticles,
                 kld_accum / Nparticles,
                 loss_accum / Nparticles,
                 dt.now() - t2,
