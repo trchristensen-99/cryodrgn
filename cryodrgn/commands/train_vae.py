@@ -53,26 +53,35 @@ import random
 logger = logging.getLogger(__name__)
 
 
-#New function to randomly flip the image
+# New function to randomly flip the image
 def augment_image(y, rot, D):
+    # Ensure both `rot` and flip matrices are the same dtype as `rot`
+    dtype = rot.dtype
+
+    # Ensure that y and rot are contiguous
+    y = y.contiguous()
+    rot = rot.contiguous()
+
     # Random flip (horizontal or vertical)
     if random.random() > 0.5:
         y = torch.flip(y, dims=[-1])  # Flip vertically
-        rot = rot @ torch.tensor([[-1, 0, 0], [0, 1, 0], [0, 0, 1]], device=y.device)  # Flip in the X-axis (horizontal flip)
+        flip_matrix = torch.tensor([[-1, 0, 0], [0, 1, 0], [0, 0, 1]], device=y.device, dtype=dtype)  # Flip in the X-axis (horizontal flip)
+        rot = rot @ flip_matrix  # Flip in the X-axis (horizontal flip)
     
     if random.random() < 0.5:
         y = torch.flip(y, dims=[-2])  # Flip horizontally
-        rot = rot @ torch.tensor([[1, 0, 0], [0, -1, 0], [0, 0, 1]], device=y.device)  # Flip in the Y-axis (vertical flip)
+        flip_matrix = torch.tensor([[1, 0, 0], [0, -1, 0], [0, 0, 1]], device=y.device, dtype=dtype)  # Flip in the Y-axis (vertical flip)
+        rot = rot @ flip_matrix  # Flip in the Y-axis (vertical flip)
 
     # Random rotation (90, 180, or 270 degrees)
     angle = random.choice([90, 180, 270])
 
     if angle == 90:
-        rot_matrix = torch.tensor([[0, -1, 0], [1, 0, 0], [0, 0, 1]], device=y.device)  # 90-degree rotation matrix around Z-axis
+        rot_matrix = torch.tensor([[0, -1, 0], [1, 0, 0], [0, 0, 1]], device=y.device, dtype=dtype)  # 90-degree rotation matrix around Z-axis
     elif angle == 180:
-        rot_matrix = torch.tensor([[-1, 0, 0], [0, -1, 0], [0, 0, 1]], device=y.device)  # 180-degree rotation matrix around Z-axis
+        rot_matrix = torch.tensor([[-1, 0, 0], [0, -1, 0], [0, 0, 1]], device=y.device, dtype=dtype)  # 180-degree rotation matrix around Z-axis
     elif angle == 270:
-        rot_matrix = torch.tensor([[0, 1, 0], [-1, 0, 0], [0, 0, 1]], device=y.device)  # 270-degree rotation matrix around Z-axis
+        rot_matrix = torch.tensor([[0, 1, 0], [-1, 0, 0], [0, 0, 1]], device=y.device, dtype=dtype)  # 270-degree rotation matrix around Z-axis
 
     # Apply rotation to the `rot` matrix
     rot = rot @ rot_matrix  # Matrix multiplication to update the rotation matrix
@@ -81,6 +90,8 @@ def augment_image(y, rot, D):
     y = torch.rot90(y, k=angle // 90, dims=(-2, -1))  # Apply the rotation to the image
 
     return y, rot
+
+
 
 
 def add_args(parser: argparse.ArgumentParser) -> None:
@@ -456,6 +467,12 @@ def train_batch(
         # Augment original image
         y_aug, rot_aug = augment_image(y.clone(), rot.clone(), lattice.D)
 
+        # Ensure tensors are contiguous
+        y = y.contiguous()
+        rot = rot.contiguous()
+        y_aug = y_aug.contiguous()
+        rot_aug = rot_aug.contiguous()
+
         # Process original and augmented images
         z_mu, z_logvar, z, y_recon, mask = run_batch(
             model, lattice, y, rot, ntilts, ctf_params, yr
@@ -497,21 +514,6 @@ def train_batch(
 
     return loss.item(), gen_loss.item(), kld.item()
 
-
-    if use_amp:
-        if scaler is not None:  # torch mixed precision
-            scaler.scale(loss).backward()
-            scaler.step(optim)
-            scaler.update()
-        else:  # apex.amp mixed precision
-            with amp.scale_loss(loss, optim) as scaled_loss:
-                scaled_loss.backward()
-            optim.step()
-    else:
-        loss.backward()
-        optim.step()
-
-    return loss.item(), gen_loss.item(), kld.item()
 
 
 def preprocess_input(y, lattice, trans):
